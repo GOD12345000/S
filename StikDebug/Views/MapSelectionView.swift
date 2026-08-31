@@ -1,32 +1,42 @@
 //
 //  MapSelectionView.swift
-//  StikDebug
+//  StikJIT
 //
 //  Created by Stephen on 11/3/25.
 //
-
 import SwiftUI
 import MapKit
 import UIKit
-import UniformTypeIdentifiers
+
+// MARK: - Private Models
 
 private struct CoordinateSnapshot: Equatable {
     let latitude: Double
     let longitude: Double
-
+    
     init(_ coordinate: CLLocationCoordinate2D) {
         latitude = coordinate.latitude
         longitude = coordinate.longitude
     }
-
+    
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 }
 
-private struct RouteSearchSelection {
+private struct RouteSearchSelection: Identifiable {
+    let id = UUID()
     let title: String
     let coordinate: CLLocationCoordinate2D
+}
+
+// Manual Equatable conformance because CLLocationCoordinate2D does not synthesize it
+extension RouteSearchSelection: Equatable {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.title == rhs.title &&
+        lhs.coordinate.latitude == rhs.coordinate.latitude &&
+        lhs.coordinate.longitude == rhs.coordinate.longitude
+    }
 }
 
 private enum RouteSearchField {
@@ -44,7 +54,6 @@ private enum RouteSimulationDefaults {
     static let pathSamplingDistance: CLLocationDistance = 10
     static let playbackTickInterval: TimeInterval = 0.5
     static let minimumSpeedMetersPerSecond: CLLocationSpeed = 1.0
-    static let importedRouteFallbackSpeedMetersPerSecond: CLLocationSpeed = 13.4
 }
 
 private struct RoutePlaybackSample {
@@ -66,17 +75,19 @@ private enum OpenStreetMapSpeedLimitService {
 
 private struct OverpassResponse: Decodable {
     let elements: [Element]
-
+    
     struct Element: Decodable {
         let tags: [String: String]?
         let geometry: [Coordinate]?
     }
-
+    
     struct Coordinate: Decodable {
         let lat: Double
         let lon: Double
     }
 }
+
+// MARK: - Extensions & Helpers
 
 private extension MKPolyline {
     var coordinateArray: [CLLocationCoordinate2D] {
@@ -105,7 +116,7 @@ private func sampledRouteCoordinates(
     targetDistance: CLLocationDistance
 ) -> [CLLocationCoordinate2D] {
     guard coordinates.count > 1 else { return coordinates }
-
+    
     var sampled = [coordinates[0]]
     for (start, end) in zip(coordinates, coordinates.dropFirst()) {
         let distance = CLLocation(latitude: start.latitude, longitude: start.longitude)
@@ -122,7 +133,6 @@ private func sampledRouteCoordinates(
             }
         }
     }
-
     return sampled
 }
 
@@ -133,13 +143,6 @@ private func midpointCoordinate(
     interpolateCoordinate(from: start, to: end, fraction: 0.5)
 }
 
-private func distanceAlong(_ coordinates: [CLLocationCoordinate2D]) -> CLLocationDistance {
-    zip(coordinates, coordinates.dropFirst()).reduce(0) { total, pair in
-        total + CLLocation(latitude: pair.0.latitude, longitude: pair.0.longitude)
-            .distance(from: CLLocation(latitude: pair.1.latitude, longitude: pair.1.longitude))
-    }
-}
-
 private func distanceFromPoint(
     _ point: MKMapPoint,
     toSegmentFrom start: MKMapPoint,
@@ -147,11 +150,10 @@ private func distanceFromPoint(
 ) -> CLLocationDistance {
     let dx = end.x - start.x
     let dy = end.y - start.y
-
     guard dx != 0 || dy != 0 else {
         return point.distance(to: start)
     }
-
+    
     let projection = max(0, min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / ((dx * dx) + (dy * dy))))
     let projectedPoint = MKMapPoint(
         x: start.x + (dx * projection),
@@ -166,7 +168,7 @@ private func parseSpeedLimitMetersPerSecond(from rawValue: String) -> CLLocation
         .split(separator: ";")
         .first?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
+    
     guard !normalized.isEmpty else { return nil }
     guard normalized != "none",
           normalized != "signals",
@@ -174,17 +176,16 @@ private func parseSpeedLimitMetersPerSecond(from rawValue: String) -> CLLocation
           normalized != "walk" else {
         return nil
     }
-
+    
     let scanner = Scanner(string: normalized)
     guard let numericValue = scanner.scanDouble() else { return nil }
-
+    
     if normalized.contains("mph") {
         return numericValue * 0.44704
     }
     if normalized.contains("knot") {
         return numericValue * 0.514444
     }
-
     return numericValue / 3.6
 }
 
@@ -193,41 +194,41 @@ private func speedLimitMetersPerSecond(from tags: [String: String]) -> CLLocatio
        let parsed = parseSpeedLimitMetersPerSecond(from: maxspeed) {
         return parsed
     }
-
+    
     let directionalValues = [
         tags["maxspeed:forward"],
         tags["maxspeed:backward"]
     ]
         .compactMap { $0 }
         .compactMap(parseSpeedLimitMetersPerSecond(from:))
-
+    
     guard !directionalValues.isEmpty else { return nil }
     return directionalValues.min()
 }
 
 private func overpassQuery(for coordinates: [CLLocationCoordinate2D]) -> String? {
     guard let first = coordinates.first else { return nil }
-
+    
     var minLatitude = first.latitude
     var maxLatitude = first.latitude
     var minLongitude = first.longitude
     var maxLongitude = first.longitude
-
-    for coordinate in coordinates.dropFirst() {
+    
+    for coordinate in coordinates.dropFirst() { 
         minLatitude = min(minLatitude, coordinate.latitude)
         maxLatitude = max(maxLatitude, coordinate.latitude)
         minLongitude = min(minLongitude, coordinate.longitude)
         maxLongitude = max(maxLongitude, coordinate.longitude)
     }
-
+    
     let padding = OpenStreetMapSpeedLimitService.boundingBoxPaddingDegrees
     let south = minLatitude - padding
     let west = minLongitude - padding
     let north = maxLatitude + padding
     let east = maxLongitude + padding
-
+    
     let bbox = String(format: "%.6f,%.6f,%.6f,%.6f", south, west, north, east)
-
+    
     return """
     [out:json][timeout:20];
     (
@@ -241,13 +242,13 @@ private func overpassQuery(for coordinates: [CLLocationCoordinate2D]) -> String?
 
 private func fetchOpenStreetMapWays(for coordinates: [CLLocationCoordinate2D]) async throws -> [OpenStreetMapWay] {
     guard let query = overpassQuery(for: coordinates) else { return [] }
-
+    
     var components = URLComponents(url: OpenStreetMapSpeedLimitService.endpoint, resolvingAgainstBaseURL: false)
     components?.queryItems = [URLQueryItem(name: "data", value: query)]
     guard let url = components?.url else { return [] }
-
+    
     let (data, response) = try await URLSession.shared.data(from: url)
-
+    
     if let httpResponse = response as? HTTPURLResponse,
        !(200...299).contains(httpResponse.statusCode) {
         throw NSError(
@@ -256,7 +257,7 @@ private func fetchOpenStreetMapWays(for coordinates: [CLLocationCoordinate2D]) a
             userInfo: [NSLocalizedDescriptionKey: "Overpass returned HTTP \(httpResponse.statusCode)."]
         )
     }
-
+    
     let decoded = try JSONDecoder().decode(OverpassResponse.self, from: data)
     return decoded.elements.compactMap { element in
         guard let tags = element.tags,
@@ -265,7 +266,7 @@ private func fetchOpenStreetMapWays(for coordinates: [CLLocationCoordinate2D]) a
               geometry.count > 1 else {
             return nil
         }
-
+        
         return OpenStreetMapWay(
             geometry: geometry,
             speedLimitMetersPerSecond: speedLimit
@@ -280,7 +281,7 @@ private func nearestSpeedLimit(
 ) -> CLLocationSpeed? {
     let midpoint = MKMapPoint(midpointCoordinate(from: start, to: end))
     var bestMatch: (speed: CLLocationSpeed, distance: CLLocationDistance)?
-
+    
     for way in ways {
         for (wayStart, wayEnd) in zip(way.geometry, way.geometry.dropFirst()) {
             let candidateDistance = distanceFromPoint(
@@ -288,18 +289,18 @@ private func nearestSpeedLimit(
                 toSegmentFrom: MKMapPoint(wayStart),
                 to: MKMapPoint(wayEnd)
             )
-
+            
             if bestMatch == nil || candidateDistance < bestMatch!.distance {
                 bestMatch = (way.speedLimitMetersPerSecond, candidateDistance)
             }
         }
     }
-
+    
     guard let bestMatch,
           bestMatch.distance <= OpenStreetMapSpeedLimitService.nearestWayThreshold else {
         return nil
     }
-
+    
     return bestMatch.speed
 }
 
@@ -309,20 +310,19 @@ private func buildPlaybackSamples(
     fallbackSpeedMetersPerSecond: CLLocationSpeed
 ) -> [RoutePlaybackSample] {
     guard let firstCoordinate = displayCoordinates.first else { return [] }
-
     var samples = [RoutePlaybackSample(coordinate: firstCoordinate, delayFromPrevious: 0)]
-
+    
     for (start, end) in zip(displayCoordinates, displayCoordinates.dropFirst()) {
         let segmentDistance = CLLocation(latitude: start.latitude, longitude: start.longitude)
             .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
         guard segmentDistance > 0 else { continue }
-
+        
         let speedLimit = nearestSpeedLimit(forSegmentFrom: start, to: end, using: speedWays) ?? fallbackSpeedMetersPerSecond
         let clampedSpeed = max(speedLimit, RouteSimulationDefaults.minimumSpeedMetersPerSecond)
         let segmentTravelTime = segmentDistance / clampedSpeed
         let segmentStepCount = max(1, Int(ceil(segmentTravelTime / RouteSimulationDefaults.playbackTickInterval)))
         let stepDelay = segmentTravelTime / Double(segmentStepCount)
-
+        
         for index in 1...segmentStepCount {
             let coordinate = interpolateCoordinate(
                 from: start,
@@ -334,7 +334,7 @@ private func buildPlaybackSamples(
             }
         }
     }
-
+    
     return samples
 }
 
@@ -350,334 +350,6 @@ private func prefetchRoutePlaybackSamples(
     )
 }
 
-private enum CoordinateImportError: LocalizedError {
-    case emptyFile
-    case noCoordinates
-
-    var errorDescription: String? {
-        switch self {
-        case .emptyFile:
-            return "The selected file is empty."
-        case .noCoordinates:
-            return "No valid coordinates were found. Use GPX, GeoJSON, JSON, CSV, or plain text with latitude and longitude values."
-        }
-    }
-}
-
-private enum CoordinateImportParser {
-    static let supportedContentTypes: [UTType] = [
-        .plainText,
-        .commaSeparatedText,
-        .json,
-        .xml,
-        UTType(filenameExtension: "gpx", conformingTo: .xml) ?? .xml,
-        UTType(filenameExtension: "kml", conformingTo: .xml) ?? .xml,
-        UTType(filenameExtension: "geojson", conformingTo: .json) ?? .json
-    ]
-
-    private enum CoordinateOrder {
-        case latitudeLongitude
-        case longitudeLatitude
-    }
-
-    static func parse(url: URL) throws -> [CLLocationCoordinate2D] {
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer {
-            if accessing {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        let data = try Data(contentsOf: url)
-        guard !data.isEmpty else { throw CoordinateImportError.emptyFile }
-
-        let fileExtension = url.pathExtension.lowercased()
-        if fileExtension == "json" || fileExtension == "geojson" {
-            if let coordinates = try? parseJSONCoordinates(from: data),
-               !coordinates.isEmpty {
-                return coordinates
-            }
-        }
-
-        if fileExtension == "gpx" || fileExtension == "kml" || fileExtension == "xml" {
-            let coordinates = parseXMLCoordinates(from: data)
-            if !coordinates.isEmpty {
-                return coordinates
-            }
-        }
-
-        if let text = decodedText(from: data) {
-            let coordinates = parseInline(text)
-            if !coordinates.isEmpty {
-                return coordinates
-            }
-        }
-
-        if let coordinates = try? parseJSONCoordinates(from: data),
-           !coordinates.isEmpty {
-            return coordinates
-        }
-
-        let coordinates = parseXMLCoordinates(from: data)
-        if !coordinates.isEmpty {
-            return coordinates
-        }
-
-        throw CoordinateImportError.noCoordinates
-    }
-
-    static func parseInline(_ text: String) -> [CLLocationCoordinate2D] {
-        sanitized(parseTextCoordinates(from: text))
-    }
-
-    private static func decodedText(from data: Data) -> String? {
-        String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .utf16)
-            ?? String(data: data, encoding: .ascii)
-    }
-
-    private static func sanitized(_ coordinates: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
-        var result: [CLLocationCoordinate2D] = []
-        for coordinate in coordinates where CLLocationCoordinate2DIsValid(coordinate) {
-            if result.last.map(CoordinateSnapshot.init) == CoordinateSnapshot(coordinate) {
-                continue
-            }
-            result.append(coordinate)
-        }
-        return result
-    }
-
-    private static func coordinate(
-        first: Double,
-        second: Double,
-        order: CoordinateOrder
-    ) -> CLLocationCoordinate2D? {
-        let preferred: CLLocationCoordinate2D
-        let fallback: CLLocationCoordinate2D
-
-        switch order {
-        case .latitudeLongitude:
-            preferred = CLLocationCoordinate2D(latitude: first, longitude: second)
-            fallback = CLLocationCoordinate2D(latitude: second, longitude: first)
-        case .longitudeLatitude:
-            preferred = CLLocationCoordinate2D(latitude: second, longitude: first)
-            fallback = CLLocationCoordinate2D(latitude: first, longitude: second)
-        }
-
-        if CLLocationCoordinate2DIsValid(preferred) {
-            return preferred
-        }
-        if CLLocationCoordinate2DIsValid(fallback) {
-            return fallback
-        }
-        return nil
-    }
-
-    private static func parseJSONCoordinates(from data: Data) throws -> [CLLocationCoordinate2D] {
-        let object = try JSONSerialization.jsonObject(with: data)
-        return sanitized(coordinates(fromJSONObject: object, order: .latitudeLongitude))
-    }
-
-    private static func coordinates(
-        fromJSONObject object: Any,
-        order: CoordinateOrder
-    ) -> [CLLocationCoordinate2D] {
-        if let dictionary = object as? [String: Any] {
-            if let latitude = numberValue(forAnyKey: ["latitude", "lat"], in: dictionary),
-               let longitude = numberValue(forAnyKey: ["longitude", "lon", "lng"], in: dictionary),
-               let coordinate = coordinate(first: latitude, second: longitude, order: .latitudeLongitude) {
-                return [coordinate]
-            }
-
-            if let geometry = dictionary["geometry"] {
-                return coordinates(fromJSONObject: geometry, order: order)
-            }
-
-            if let type = dictionary["type"] as? String {
-                let loweredType = type.lowercased()
-                if loweredType == "featurecollection",
-                   let features = dictionary["features"] as? [Any] {
-                    return features.flatMap { coordinates(fromJSONObject: $0, order: .longitudeLatitude) }
-                }
-                if loweredType == "geometrycollection",
-                   let geometries = dictionary["geometries"] as? [Any] {
-                    return geometries.flatMap { coordinates(fromJSONObject: $0, order: .longitudeLatitude) }
-                }
-                if let coordinateObject = dictionary["coordinates"] {
-                    return coordinates(fromJSONObject: coordinateObject, order: .longitudeLatitude)
-                }
-            }
-
-            return dictionary.values.flatMap { coordinates(fromJSONObject: $0, order: order) }
-        }
-
-        if let array = object as? [Any] {
-            if array.count >= 2,
-               let first = numericValue(array[0]),
-               let second = numericValue(array[1]),
-               let coordinate = coordinate(first: first, second: second, order: order) {
-                return [coordinate]
-            }
-
-            return array.flatMap { coordinates(fromJSONObject: $0, order: order) }
-        }
-
-        return []
-    }
-
-    private static func numericValue(_ value: Any) -> Double? {
-        if let number = value as? NSNumber {
-            return number.doubleValue
-        }
-        if let string = value as? String {
-            return Double(string.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-        return nil
-    }
-
-    private static func numberValue(forAnyKey keys: [String], in dictionary: [String: Any]) -> Double? {
-        let keyedValues = Dictionary(uniqueKeysWithValues: dictionary.map { ($0.key.lowercased(), $0.value) })
-        for key in keys {
-            if let value = keyedValues[key],
-               let number = numericValue(value) {
-                return number
-            }
-        }
-        return nil
-    }
-
-    private static func parseXMLCoordinates(from data: Data) -> [CLLocationCoordinate2D] {
-        let collector = XMLCoordinateCollector()
-        let parser = XMLParser(data: data)
-        parser.delegate = collector
-        guard parser.parse() else { return [] }
-        return sanitized(collector.coordinates)
-    }
-
-    private final class XMLCoordinateCollector: NSObject, XMLParserDelegate {
-        var coordinates: [CLLocationCoordinate2D] = []
-        private var isCollectingKMLCoordinates = false
-        private var kmlCoordinateBuffer = ""
-
-        func parser(
-            _ parser: XMLParser,
-            didStartElement elementName: String,
-            namespaceURI: String?,
-            qualifiedName qName: String?,
-            attributes attributeDict: [String: String] = [:]
-        ) {
-            let name = elementName.lowercased()
-            if ["wpt", "trkpt", "rtept"].contains(name),
-               let latitude = Double(attributeDict["lat"] ?? ""),
-               let longitude = Double(attributeDict["lon"] ?? ""),
-               let coordinate = CoordinateImportParser.coordinate(
-                    first: latitude,
-                    second: longitude,
-                    order: .latitudeLongitude
-               ) {
-                coordinates.append(coordinate)
-            } else if name == "coordinates" {
-                isCollectingKMLCoordinates = true
-                kmlCoordinateBuffer = ""
-            }
-        }
-
-        func parser(_ parser: XMLParser, foundCharacters string: String) {
-            if isCollectingKMLCoordinates {
-                kmlCoordinateBuffer += string
-            }
-        }
-
-        func parser(
-            _ parser: XMLParser,
-            didEndElement elementName: String,
-            namespaceURI: String?,
-            qualifiedName qName: String?
-        ) {
-            guard elementName.lowercased() == "coordinates" else { return }
-            coordinates.append(contentsOf: CoordinateImportParser.parseKMLCoordinateText(kmlCoordinateBuffer))
-            isCollectingKMLCoordinates = false
-            kmlCoordinateBuffer = ""
-        }
-    }
-
-    private static func parseKMLCoordinateText(_ text: String) -> [CLLocationCoordinate2D] {
-        text
-            .split(whereSeparator: { $0.isWhitespace })
-            .compactMap { token -> CLLocationCoordinate2D? in
-                let values = token
-                    .split(separator: ",")
-                    .compactMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                guard values.count >= 2 else { return nil }
-                return coordinate(first: values[0], second: values[1], order: .longitudeLatitude)
-            }
-    }
-
-    private static func parseTextCoordinates(from text: String) -> [CLLocationCoordinate2D] {
-        var coordinates: [CLLocationCoordinate2D] = []
-        var headerIndices: (latitude: Int, longitude: Int)?
-
-        for line in text.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-
-            let fields = splitFields(trimmed)
-            if headerIndices == nil,
-               let detectedHeader = detectHeader(in: fields) {
-                headerIndices = detectedHeader
-                continue
-            }
-
-            if let headerIndices,
-               fields.indices.contains(headerIndices.latitude),
-               fields.indices.contains(headerIndices.longitude),
-               let latitude = numbers(in: fields[headerIndices.latitude]).first,
-               let longitude = numbers(in: fields[headerIndices.longitude]).first,
-               let coordinate = coordinate(first: latitude, second: longitude, order: .latitudeLongitude) {
-                coordinates.append(coordinate)
-                continue
-            }
-
-            let values = numbers(in: trimmed)
-            if values.count >= 2,
-               let coordinate = coordinate(first: values[0], second: values[1], order: .latitudeLongitude) {
-                coordinates.append(coordinate)
-            }
-        }
-
-        return coordinates
-    }
-
-    private static func splitFields(_ line: String) -> [String] {
-        line
-            .split { character in
-                character == "," ||
-                character == ";" ||
-                character == "\t"
-            }
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-    }
-
-    private static func detectHeader(in fields: [String]) -> (latitude: Int, longitude: Int)? {
-        let lowered = fields.map { $0.lowercased() }
-        guard let latitude = lowered.firstIndex(where: { $0 == "lat" || $0 == "latitude" }),
-              let longitude = lowered.firstIndex(where: { $0 == "lon" || $0 == "lng" || $0 == "long" || $0 == "longitude" }) else {
-            return nil
-        }
-        return (latitude, longitude)
-    }
-
-    private static func numbers(in text: String) -> [Double] {
-        let pattern = #"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.matches(in: text, range: range).compactMap { match in
-            guard let matchRange = Range(match.range, in: text) else { return nil }
-            return Double(text[matchRange])
-        }
-    }
-}
-
 // MARK: - Bookmark Model
 
 struct LocationBookmark: Identifiable, Codable {
@@ -685,7 +357,7 @@ struct LocationBookmark: Identifiable, Codable {
     var name: String
     var latitude: Double
     var longitude: Double
-
+    
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
@@ -697,13 +369,13 @@ struct LocationBookmark: Identifiable, Codable {
 final class LocationSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
     @Published var results: [MKLocalSearchCompletion] = []
     private let completer = MKLocalSearchCompleter()
-
+    
     override init() {
         super.init()
         completer.delegate = self
         completer.resultTypes = [.address, .pointOfInterest]
     }
-
+    
     func update(query: String) {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             results = []
@@ -712,21 +384,25 @@ final class LocationSearchCompleter: NSObject, ObservableObject, MKLocalSearchCo
         }
         completer.queryFragment = query
     }
-
+    
     nonisolated func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
         let results = completer.results
         Task { @MainActor in self.results = results }
     }
-
+    
     nonisolated func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
         Task { @MainActor in self.results = [] }
     }
 }
 
+// MARK: - Main View
+
 struct LocationSimulationView: View {
+    private static let locationQueue = DispatchQueue(label: "com.stik.location-sim", qos: .userInitiated)
+    
     @State private var coordinate: CLLocationCoordinate2D?
     @State private var position: MapCameraPosition = .userLocation(fallback: .automatic)
-
+    
     @State private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     @State private var resendTimer: Timer?
     @State private var routeLoadTask: Task<Void, Never>?
@@ -735,88 +411,77 @@ struct LocationSimulationView: View {
     @State private var isBusy = false
     @State private var isLoadingRoute = false
     @State private var isPrefetchingRouteSpeeds = false
-    @State private var isImportingCoordinates = false
     @State private var showAlert = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
-
+    
     @State private var searchText = ""
     @StateObject private var searchCompleter = LocationSearchCompleter()
-    @State private var showCoordinateImporter = false
+    
+    // Route state & multi-waypoint support
     @State private var showRouteSearch = false
-    @State private var routeStartSelection: RouteSearchSelection?
-    @State private var routeEndSelection: RouteSearchSelection?
+    @State private var showAddWaypoint = false
+    @State private var waypoints: [RouteSearchSelection] = []
     @State private var routePlan: RouteSimulationPlan?
-    @State private var routePolyline: MKPolyline?
     @State private var routePlaybackSamples: [RoutePlaybackSample] = []
     @State private var routePlaybackCoordinate: CLLocationCoordinate2D?
     @State private var simulatedCoordinate: CLLocationCoordinate2D?
     @State private var routeRequestID = UUID()
-
-    private static let routeDurationFormatter: DateComponentsFormatter = {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.hour, .minute]
-        formatter.unitsStyle = .abbreviated
-        formatter.zeroFormattingBehavior = .dropAll
-        return formatter
-    }()
-
+    
+    // Keyboard focus (Fix 1)
+    @FocusState private var isSpeedFieldFocused: Bool
+    
     // Bookmarks
     @State private var bookmarks: [LocationBookmark] = []
     @State private var showBookmarks = false
     @State private var showSaveBookmark = false
     @State private var newBookmarkName = ""
-
+    
+    @State private var latitudeText = ""
+    @State private var longitudeText = ""
+    @State private var customSpeedKmh: Double = 60.0
+    
     private var pairingFilePath: String {
-        PairingFileStore.prepareURL().path
+        PairingFileStore.prepareURL().path()
     }
-
+    
     private var pairingExists: Bool {
         FileManager.default.fileExists(atPath: pairingFilePath)
     }
-
+    
     private var deviceIP: String {
-        DeviceConnectionContext.targetIPAddress
+        let stored = UserDefaults.standard.string(forKey: "customTargetIP") ?? ""
+        return stored.isEmpty ? "10.7.0.1" : stored
     }
-
-    private var routeStartCoordinate: CLLocationCoordinate2D? {
-        routeStartSelection?.coordinate
+    
+    private var routePolyline: MKPolyline? {
+        guard let routePlan, routePlan.displayCoordinates.count > 1 else { return nil }
+        return routePlan.displayCoordinates.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return nil }
+            return MKPolyline(coordinates: baseAddress, count: buffer.count)
+        }
     }
-
-    private var routeEndCoordinate: CLLocationCoordinate2D? {
-        routeEndSelection?.coordinate
-    }
-
+    
     private var hasActiveSimulation: Bool {
         simulatedCoordinate != nil || routePlaybackTask != nil
     }
-
+    
     private var isRouteRunning: Bool {
         routePlaybackTask != nil
     }
-
+    
     private var hasRouteContext: Bool {
-        routeStartSelection != nil ||
-        routeEndSelection != nil ||
-        routePlan != nil ||
-        isLoadingRoute ||
-        isPrefetchingRouteSpeeds ||
-        routePlaybackCoordinate != nil
+        !waypoints.isEmpty || routePlan != nil || isLoadingRoute || isPrefetchingRouteSpeeds || routePlaybackCoordinate != nil
     }
-
+    
     private var routeSummaryText: String? {
         guard let routePlan else { return nil }
-        let distanceText = Measurement(
+        return Measurement(
             value: routePlan.distance / 1000,
             unit: UnitLength.kilometers
         ).formatted(.measurement(width: .abbreviated, usage: .road))
-        let durationText = Self.routeDurationFormatter.string(from: routePlan.expectedTravelTime)
-        if let durationText, !durationText.isEmpty {
-            return "\(distanceText) • ETA \(durationText)"
-        }
-        return distanceText
     }
-
+    
     private var routeStatusText: String {
         if isLoadingRoute {
             return "Calculating route…"
@@ -827,12 +492,15 @@ struct LocationSimulationView: View {
         if routePlan != nil {
             return "Route ready."
         }
-        if routeStartSelection != nil || routeEndSelection != nil {
-            return "Pick both route endpoints to build the drive."
+        if waypoints.count >= 2 {
+            return "Tap Play Route to start simulation."
+        } else if waypoints.isEmpty {
+            return "Plan a route from the toolbar."
+        } else {
+            return "Add at least one more waypoint to build the route."
         }
-        return "Plan a route from the toolbar."
     }
-
+    
     private var routeAttributionLink: some View {
         Link(
             "Speed limit data © OpenStreetMap contributors (ODbL)",
@@ -841,7 +509,7 @@ struct LocationSimulationView: View {
         .font(.caption2)
         .foregroundStyle(.secondary)
     }
-
+    
     private var searchResultsListBase: some View {
         List(searchCompleter.results.prefix(5), id: \.self) { result in
             Button {
@@ -864,7 +532,7 @@ struct LocationSimulationView: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
     }
-
+    
     @ViewBuilder
     private var searchResultsList: some View {
         if #available(iOS 26, *) {
@@ -874,7 +542,62 @@ struct LocationSimulationView: View {
             searchResultsListBase
         }
     }
-
+    
+    // MARK: - Waypoints UI (Fix 2)
+    
+    @ViewBuilder
+    private var waypointsChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(waypoints.enumerated()), id: \.element.id) { index, waypoint in
+                    HStack(spacing: 6) {
+                        Image(systemName: index == 0 ? "circle.fill" : index == waypoints.count - 1 ? "flag.checkered.circle.fill" : "location.circle.fill")
+                            .foregroundStyle(index == 0 ? .green : index == waypoints.count - 1 ? .red : .orange)
+                        Text(waypoint.title)
+                            .font(.footnote)
+                            .lineLimit(1)
+                            .frame(maxWidth: 100)
+                        if waypoints.count > 2 {
+                            Button {
+                                removeWaypoint(at: index)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                
+                Button {
+                    showAddWaypoint = true
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+                .disabled(isRouteRunning)
+            }
+            .padding(.horizontal, 4)
+        }
+    }
+    
+    private func removeWaypoint(at index: Int) {
+        guard !isRouteRunning else { return }
+        waypoints.remove(at: index)
+        if waypoints.count < 2 {
+            resetRouteSelection()
+        } else {
+            refreshRoute()
+        }
+    }
+    
+    // MARK: - Body
+    
     var body: some View {
         ZStack(alignment: .bottom) {
             MapReader { proxy in
@@ -884,13 +607,9 @@ struct LocationSimulationView: View {
                             MapPolyline(routePolyline)
                                 .stroke(.blue.opacity(0.8), lineWidth: 5)
                         }
-                        if let routeStartCoordinate {
-                            Marker("Start", coordinate: routeStartCoordinate)
-                                .tint(.green)
-                        }
-                        if let routeEndCoordinate {
-                            Marker("End", coordinate: routeEndCoordinate)
-                                .tint(.red)
+                        ForEach(Array(waypoints.enumerated()), id: \.offset) { index, waypoint in
+                            Marker("", coordinate: waypoint.coordinate)
+                                .tint(index == 0 ? .green : index == waypoints.count - 1 ? .red : .orange)
                         }
                         if let routePlaybackCoordinate {
                             Marker("Current", coordinate: routePlaybackCoordinate)
@@ -911,32 +630,29 @@ struct LocationSimulationView: View {
                     MapCompass()
                 }
             }
-                .ignoresSafeArea()
-                .onChange(of: coordinate.map(CoordinateSnapshot.init)) { _, new in
-                    if let new {
-                        position = .region(
-                            MKCoordinateRegion(
-                                center: new.coordinate,
-                                latitudinalMeters: 1000,
-                                longitudinalMeters: 1000
-                            )
+            .ignoresSafeArea()
+            .onChange(of: coordinate.map(CoordinateSnapshot.init)) { _, new in
+                if let new {
+                    position = .region(
+                        MKCoordinateRegion(
+                            center: new.coordinate,
+                            latitudinalMeters: 1000,
+                            longitudinalMeters: 1000
                         )
-                    }
+                    )
+                    latitudeText = String(format: "%.6f", new.coordinate.latitude)
+                    longitudeText = String(format: "%.6f", new.coordinate.longitude)
                 }
-
+            }
+            
             VStack(spacing: 0) {
                 if !searchCompleter.results.isEmpty {
                     searchResultsList
                 }
-
+                
                 Spacer()
-
+                
                 VStack(spacing: 12) {
-                    if isImportingCoordinates {
-                        ProgressView("Importing coordinates…")
-                            .font(.footnote)
-                    }
-
                     if hasRouteContext {
                         routeControls
                     } else {
@@ -944,7 +660,6 @@ struct LocationSimulationView: View {
                     }
                 }
                 .padding(.bottom, 24)
-                .padding(.horizontal, 16)
                 .padding(.horizontal, 16)
             }
         }
@@ -956,32 +671,20 @@ struct LocationSimulationView: View {
                 } label: {
                     Image(systemName: "bookmark.fill")
                 }
-
+                
                 Button {
                     showRouteSearch = true
                 } label: {
                     Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
                 }
                 .disabled(isBusy || isRouteRunning)
-
-                Button {
-                    showCoordinateImporter = true
-                } label: {
-                    Image(systemName: "square.and.arrow.down")
-                }
-                .disabled(isBusy || isRouteRunning || isImportingCoordinates)
-                .accessibilityLabel("Import Coordinates")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 TextField("Search location...", text: $searchText)
                     .padding(.leading, 6)
                     .autocorrectionDisabled()
-                    .submitLabel(.go)
                     .onChange(of: searchText) { _, newValue in
                         searchCompleter.update(query: newValue)
-                    }
-                    .onSubmit {
-                        applyCoordinatesFromSearchText()
                     }
             }
         }
@@ -1008,20 +711,32 @@ struct LocationSimulationView: View {
         }
         .sheet(isPresented: $showRouteSearch) {
             RouteSearchSheet(
-                initialStart: routeStartSelection,
-                initialEnd: routeEndSelection
+                initialStart: waypoints.first,
+                initialEnd: waypoints.last
             ) { startSelection, endSelection in
-                routeStartSelection = startSelection
-                routeEndSelection = endSelection
+                if waypoints.isEmpty {
+                    waypoints = [startSelection, endSelection]
+                } else {
+                    var updated = waypoints
+                    if !updated.isEmpty { updated[0] = startSelection }
+                    if updated.count > 1 { updated[updated.count - 1] = endSelection }
+                    waypoints = updated
+                }
                 refreshRoute()
             }
         }
-        .fileImporter(
-            isPresented: $showCoordinateImporter,
-            allowedContentTypes: CoordinateImportParser.supportedContentTypes,
-            allowsMultipleSelection: false
-        ) { result in
-            importCoordinates(result)
+        .sheet(isPresented: $showAddWaypoint) {
+            RouteSearchSheet(
+                initialStart: nil,
+                initialEnd: nil
+            ) { newSelection, _ in
+                if waypoints.count > 1 {
+                    waypoints.insert(newSelection, at: waypoints.count - 1)
+                } else {
+                    waypoints.append(newSelection)
+                }
+                refreshRoute()
+            }
         }
         .onAppear {
             loadBookmarks()
@@ -1039,21 +754,21 @@ struct LocationSimulationView: View {
             endBackgroundTask()
         }
     }
-
+    
     // MARK: - Bookmarks
-
+    
     private func loadBookmarks() {
         guard let data = UserDefaults.standard.data(forKey: "locationBookmarks"),
               let decoded = try? JSONDecoder().decode([LocationBookmark].self, from: data) else { return }
         bookmarks = decoded
     }
-
+    
     private func saveBookmarks() {
         if let data = try? JSONEncoder().encode(bookmarks) {
             UserDefaults.standard.set(data, forKey: "locationBookmarks")
         }
     }
-
+    
     private func addBookmark() {
         guard let coord = coordinate else { return }
         let name = newBookmarkName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1066,26 +781,13 @@ struct LocationSimulationView: View {
         saveBookmarks()
         newBookmarkName = ""
     }
-
-    private func setRoutePlan(_ plan: RouteSimulationPlan?) {
-        routePlan = plan
-        routePolyline = plan.flatMap { makeRoutePolyline(for: $0.displayCoordinates) }
-    }
-
-    private func makeRoutePolyline(for coordinates: [CLLocationCoordinate2D]) -> MKPolyline? {
-        guard coordinates.count > 1 else { return nil }
-        return coordinates.withUnsafeBufferPointer { buffer in
-            guard let baseAddress = buffer.baseAddress else { return nil }
-            return MKPolyline(coordinates: baseAddress, count: buffer.count)
-        }
-    }
-
+    
     // MARK: - Location
-
+    
     private func selectSearchResult(_ result: MKLocalSearchCompletion) {
         searchText = ""
         searchCompleter.results = []
-
+        
         let request = MKLocalSearch.Request(completion: result)
         MKLocalSearch(request: request).start { response, _ in
             if let item = response?.mapItems.first {
@@ -1093,142 +795,43 @@ struct LocationSimulationView: View {
             }
         }
     }
-
-    private func applyCoordinatesFromSearchText() {
-        let importedCoordinates = CoordinateImportParser.parseInline(searchText)
-        guard !importedCoordinates.isEmpty else { return }
-
-        searchText = ""
-        searchCompleter.results = []
-        applyImportedCoordinates(importedCoordinates, sourceName: "Imported")
-    }
-
-    private func importCoordinates(_ result: Result<[URL], Error>) {
-        switch result {
-        case .success(let urls):
-            guard let url = urls.first else { return }
-            let sourceName = url.deletingPathExtension().lastPathComponent
-            isImportingCoordinates = true
-
-            Task {
-                do {
-                    let coordinates = try await Task.detached(priority: .userInitiated) {
-                        try CoordinateImportParser.parse(url: url)
-                    }.value
-
-                    await MainActor.run {
-                        isImportingCoordinates = false
-                        applyImportedCoordinates(
-                            coordinates,
-                            sourceName: sourceName.isEmpty ? "Imported" : sourceName
-                        )
-                    }
-                } catch {
-                    await MainActor.run {
-                        isImportingCoordinates = false
-                        showImportError(error)
-                    }
-                }
-            }
-        case .failure(let error):
-            showImportError(error)
-        }
-    }
-
-    private func applyImportedCoordinates(
-        _ importedCoordinates: [CLLocationCoordinate2D],
-        sourceName: String
-    ) {
-        guard !isRouteRunning else { return }
-
-        let coordinates = importedCoordinates.filter(CLLocationCoordinate2DIsValid)
-        guard let firstCoordinate = coordinates.first else {
-            showImportError(CoordinateImportError.noCoordinates)
-            return
-        }
-
-        if coordinates.count == 1 {
-            applySelection(firstCoordinate)
-            return
-        }
-
-        routeLoadTask?.cancel()
-        routeLoadTask = nil
-        routeSpeedPrefetchTask?.cancel()
-        routeSpeedPrefetchTask = nil
-        routeRequestID = UUID()
-        setRoutePlan(nil)
-        routePlaybackSamples = []
-        routePlaybackCoordinate = nil
-        isLoadingRoute = false
-        isPrefetchingRouteSpeeds = false
-        coordinate = nil
-
-        let displayCoordinates = sampledRouteCoordinates(
-            from: coordinates,
-            targetDistance: RouteSimulationDefaults.pathSamplingDistance
-        )
-
-        guard displayCoordinates.count > 1,
-              let lastCoordinate = displayCoordinates.last else {
-            applySelection(firstCoordinate)
-            return
-        }
-
-        let distance = distanceAlong(displayCoordinates)
-        let fallbackSpeed = RouteSimulationDefaults.importedRouteFallbackSpeedMetersPerSecond
-        routeStartSelection = RouteSearchSelection(title: "\(sourceName) Start", coordinate: firstCoordinate)
-        routeEndSelection = RouteSearchSelection(title: "\(sourceName) End", coordinate: lastCoordinate)
-        setRoutePlan(RouteSimulationPlan(
-            displayCoordinates: displayCoordinates,
-            distance: distance,
-            expectedTravelTime: distance / fallbackSpeed
-        ))
-
-        if let routePolyline {
-            position = .rect(routePolyline.boundingMapRect)
-        }
-
-        let requestID = UUID()
-        routeRequestID = requestID
-        isPrefetchingRouteSpeeds = true
-        routeSpeedPrefetchTask = Task.detached(priority: .utility) {
-            let playbackSamples = await prefetchRoutePlaybackSamples(
-                displayCoordinates: displayCoordinates,
-                fallbackSpeedMetersPerSecond: fallbackSpeed
-            )
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard routeRequestID == requestID else { return }
-                routePlaybackSamples = playbackSamples
-                isPrefetchingRouteSpeeds = false
-            }
-        }
-    }
-
-    private func showImportError(_ error: Error) {
-        alertTitle = "Import Failed"
-        alertMessage = error.localizedDescription
-        showAlert = true
-    }
-
+    
     @ViewBuilder
     private var pinControls: some View {
+        HStack(spacing: 8) {
+            TextField("Latitude", text: $latitudeText)
+                .keyboardType(.numbersAndPunctuation)
+                .textFieldStyle(.roundedBorder)
+                .font(.footnote.monospaced())
+            
+            TextField("Longitude", text: $longitudeText)
+                .keyboardType(.numbersAndPunctuation)
+                .textFieldStyle(.roundedBorder)
+                .font(.footnote.monospaced())
+            
+            Button("Go") {
+                applyManualCoordinates()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(latitudeText.isEmpty || longitudeText.isEmpty)
+        }
+        
         if let coord = coordinate {
             Text(String(format: "%.6f, %.6f", coord.latitude, coord.longitude))
                 .font(.footnote.monospaced())
                 .foregroundStyle(.secondary)
-
+            
             HStack(spacing: 12) {
                 Button("Stop", action: clear)
                     .buttonStyle(.bordered)
                     .tint(.red)
                     .disabled(!pairingExists || isBusy || !hasActiveSimulation)
-
+                
                 Button("Simulate Location", action: simulate)
                     .buttonStyle(.borderedProminent)
                     .disabled(!pairingExists || isBusy || isLoadingRoute)
-
+                
                 Button {
                     showSaveBookmark = true
                 } label: {
@@ -1239,18 +842,22 @@ struct LocationSimulationView: View {
                 .disabled(isRouteRunning)
             }
         } else {
-            Text("Tap map to drop pin")
+            Text("Tap map to drop pin or enter coordinates")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
     }
-
+    
+    // MARK: - Route Controls (Fix 1: Keyboard Dismissal)
+    
     private var routeControls: some View {
         VStack(spacing: 10) {
+            waypointsChips
+            
             Text(routeStatusText)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-
+            
             if isLoadingRoute || isPrefetchingRouteSpeeds {
                 ProgressView()
                     .controlSize(.small)
@@ -1259,15 +866,55 @@ struct LocationSimulationView: View {
                     .font(.footnote.monospaced())
                     .foregroundStyle(.secondary)
             }
-
+            
+            if routePlan != nil && !isLoadingRoute {
+                VStack(spacing: 6) {
+                    HStack {
+                        Text("Speed:")
+                            .font(.footnote.weight(.medium))
+                        TextField("km/h", value: $customSpeedKmh, format: .number.precision(.fractionLength(1)))
+                            .keyboardType(.decimalPad)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.footnote.monospaced())
+                            .frame(width: 80)
+                            .focused($isSpeedFieldFocused)
+                            .onSubmit {
+                                isSpeedFieldFocused = false
+                            }
+                            .toolbar {
+                                ToolbarItemGroup(placement: .keyboard) {
+                                    Spacer()
+                                    Button("Done") {
+                                        isSpeedFieldFocused = false
+                                    }
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.blue)
+                                }
+                            }
+                        Text("km/h")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $customSpeedKmh, in: 1...120, step: 0.1)
+                        .onChange(of: customSpeedKmh) { _, newValue in
+                            let clamped = min(120, max(1, newValue))
+                            if clamped != newValue {
+                                customSpeedKmh = clamped
+                            }
+                            rebuildPlaybackSamplesIfNeeded()
+                        }
+                }
+                .padding(.horizontal, 4)
+            }
+            
             routeAttributionLink
-
+            
             HStack(spacing: 12) {
                 Button("Stop", action: clear)
                     .buttonStyle(.bordered)
                     .tint(.red)
                     .disabled(!pairingExists || isBusy || !hasActiveSimulation)
-
+                
                 Button("Play Route", action: simulateRoute)
                     .buttonStyle(.borderedProminent)
                     .disabled(
@@ -1278,14 +925,16 @@ struct LocationSimulationView: View {
                         routePlan == nil ||
                         routePlaybackSamples.isEmpty
                     )
-
+                
                 Button("Reset", action: resetRouteSelection)
                     .buttonStyle(.bordered)
                     .disabled(isBusy || isRouteRunning)
             }
         }
     }
-
+    
+    // MARK: - Actions
+    
     private func simulate() {
         guard pairingExists, let coord = coordinate, !isBusy else { return }
         runLocationCommand(
@@ -1301,11 +950,10 @@ struct LocationSimulationView: View {
             BackgroundLocationManager.shared.requestStart()
         }
     }
-
+    
     private func simulateRoute() {
         guard pairingExists,
-              routePlan != nil,
-              let firstCoordinate = routePlaybackSamples.first?.coordinate,
+              let firstCoordinate = routePlan?.displayCoordinates.first,
               !isBusy else {
             return
         }
@@ -1325,7 +973,7 @@ struct LocationSimulationView: View {
             startRoutePlayback()
         }
     }
-
+    
     private func runLocationCommand(
         errorTitle: String,
         errorMessage: @escaping (Int32) -> String,
@@ -1333,7 +981,7 @@ struct LocationSimulationView: View {
         onSuccess: @escaping () -> Void
     ) {
         isBusy = true
-        LocationSimulationCommandQueue.shared.async {
+        Self.locationQueue.async {
             let code = operation()
             DispatchQueue.main.async {
                 isBusy = false
@@ -1347,7 +995,7 @@ struct LocationSimulationView: View {
             }
         }
     }
-
+    
     private func clear() {
         guard pairingExists, !isBusy else { return }
         routeLoadTask?.cancel()
@@ -1365,35 +1013,35 @@ struct LocationSimulationView: View {
             BackgroundLocationManager.shared.requestStop()
         }
     }
-
+    
     private func beginBackgroundTask() {
         guard backgroundTaskID == .invalid else { return }
         backgroundTaskID = UIApplication.shared.beginBackgroundTask { endBackgroundTask() }
     }
-
+    
     private func endBackgroundTask() {
         guard backgroundTaskID != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTaskID)
         backgroundTaskID = .invalid
     }
-
+    
     private func startResendLoop(with coordinate: CLLocationCoordinate2D) {
         simulatedCoordinate = coordinate
         resendTimer?.invalidate()
         resendTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { _ in
             guard let simulatedCoordinate else { return }
-            LocationSimulationCommandQueue.shared.async {
+            Self.locationQueue.async {
                 _ = locationUpdateCode(for: simulatedCoordinate)
             }
         }
     }
-
+    
     private func stopResendLoop() {
         resendTimer?.invalidate()
         resendTimer = nil
         simulatedCoordinate = nil
     }
-
+    
     private func cancelRoutePlayback(resetMarker: Bool) {
         routePlaybackTask?.cancel()
         routePlaybackTask = nil
@@ -1401,7 +1049,7 @@ struct LocationSimulationView: View {
             routePlaybackCoordinate = nil
         }
     }
-
+    
     private func applySelection(_ coordinate: CLLocationCoordinate2D) {
         guard !isRouteRunning else { return }
         if hasRouteContext {
@@ -1409,46 +1057,77 @@ struct LocationSimulationView: View {
         }
         self.coordinate = coordinate
     }
-
+    
     private func resetRouteSelection() {
         routeLoadTask?.cancel()
         routeLoadTask = nil
         routeSpeedPrefetchTask?.cancel()
         routeSpeedPrefetchTask = nil
         routeRequestID = UUID()
-        setRoutePlan(nil)
-        routeStartSelection = nil
-        routeEndSelection = nil
+        routePlan = nil
+        waypoints = []
         routePlaybackSamples = []
         routePlaybackCoordinate = nil
         isLoadingRoute = false
         isPrefetchingRouteSpeeds = false
     }
-
+    
+    private func applyManualCoordinates() {
+        let latStr = latitudeText.trimmingCharacters(in: .whitespaces)
+        let lonStr = longitudeText.trimmingCharacters(in: .whitespaces)
+        guard let lat = Double(latStr),
+              let lon = Double(lonStr),
+              (-90...90).contains(lat),
+              (-180...180).contains(lon) else {
+            alertTitle = "Invalid Coordinates"
+            alertMessage = "Please enter valid latitude (-90 to 90) and longitude (-180 to 180)."
+            showAlert = true
+            return
+        }
+        applySelection(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+    }
+    
+    private func rebuildPlaybackSamplesIfNeeded() {
+        guard let routePlan else { return }
+        let speedMps = customSpeedKmh / 3.6
+        routePlaybackSamples = buildPlaybackSamples(
+            from: routePlan.displayCoordinates,
+            speedWays: [],
+            fallbackSpeedMetersPerSecond: speedMps
+        )
+    }
+    
+    // MARK: - Route Refresh (Fix 3: Removed unsupported waypoints API)
+    
     private func refreshRoute() {
         routeLoadTask?.cancel()
         routeSpeedPrefetchTask?.cancel()
-        setRoutePlan(nil)
+        routePlan = nil
         routePlaybackSamples = []
-
-        guard let routeStart = routeStartSelection?.coordinate,
-              let routeEnd = routeEndSelection?.coordinate else {
+        
+        // Need at least start + end
+        guard waypoints.count >= 2 else {
             isLoadingRoute = false
             isPrefetchingRouteSpeeds = false
             return
         }
-
+        
         let requestID = UUID()
         routeRequestID = requestID
         isLoadingRoute = true
         isPrefetchingRouteSpeeds = false
-
+        
         let request = MKDirections.Request()
-        request.source = MKMapItem(placemark: MKPlacemark(coordinate: routeStart))
-        request.destination = MKMapItem(placemark: MKPlacemark(coordinate: routeEnd))
+        request.source = MKMapItem(placemark: MKPlacemark(coordinate: waypoints.first!.coordinate))
+        request.destination = MKMapItem(placemark: MKPlacemark(coordinate: waypoints.last!.coordinate))
+        
+        // Note: MapKit's MKDirections.Request does not officially support intermediate waypoints.
+        // The route will be calculated from the first to the last point.
+        // Waypoints are still displayed on the map for visual reference.
+        
         request.requestsAlternateRoutes = false
         request.transportType = .automobile
-
+        
         routeLoadTask = Task {
             do {
                 let response = try await MKDirections(request: request).calculate()
@@ -1460,46 +1139,30 @@ struct LocationSimulationView: View {
                         userInfo: [NSLocalizedDescriptionKey: "No drivable route was returned."]
                     )
                 }
-
+                
                 let displayCoordinates = sampledRouteCoordinates(
                     from: route.polyline.coordinateArray,
                     targetDistance: RouteSimulationDefaults.pathSamplingDistance
                 )
-                let routePlan = RouteSimulationPlan(
+                let plan = RouteSimulationPlan(
                     displayCoordinates: displayCoordinates,
                     distance: route.distance,
                     expectedTravelTime: route.expectedTravelTime
                 )
-
+                
                 await MainActor.run {
                     guard routeRequestID == requestID else { return }
-                    self.setRoutePlan(routePlan)
+                    self.routePlan = plan
                     isLoadingRoute = false
-                    isPrefetchingRouteSpeeds = true
+                    isPrefetchingRouteSpeeds = false
                     if let routePolyline {
                         position = .rect(routePolyline.boundingMapRect)
                     }
                 }
-
-                let fallbackSpeed = route.expectedTravelTime > 0
-                    ? route.distance / route.expectedTravelTime
-                    : 13.4
-
+                
                 await MainActor.run {
                     guard routeRequestID == requestID else { return }
-                    routeSpeedPrefetchTask?.cancel()
-                    routeSpeedPrefetchTask = Task.detached(priority: .utility) {
-                        let playbackSamples = await prefetchRoutePlaybackSamples(
-                            displayCoordinates: displayCoordinates,
-                            fallbackSpeedMetersPerSecond: fallbackSpeed
-                        )
-                        guard !Task.isCancelled else { return }
-                        await MainActor.run {
-                            guard routeRequestID == requestID else { return }
-                            routePlaybackSamples = playbackSamples
-                            isPrefetchingRouteSpeeds = false
-                        }
-                    }
+                    rebuildPlaybackSamplesIfNeeded()
                 }
             } catch is CancellationError {
                 await MainActor.run {
@@ -1519,16 +1182,29 @@ struct LocationSimulationView: View {
             }
         }
     }
-
+    
     private func startRoutePlayback() {
+        guard let routePlan else { return }
+        let coordinates = routePlan.displayCoordinates
+        guard coordinates.count > 1 else { return }
+        
         routePlaybackTask = Task {
-            var lastSuccessfulCoordinate = routePlaybackSamples.first?.coordinate
-
-            for sample in routePlaybackSamples.dropFirst() {
-                try? await Task.sleep(for: .seconds(sample.delayFromPrevious))
+            var lastSuccessfulCoordinate = coordinates.first
+            
+            for i in 1..<coordinates.count {
+                let prev = coordinates[i - 1]
+                let curr = coordinates[i]
+                let distance = CLLocation(latitude: prev.latitude, longitude: prev.longitude)
+                    .distance(from: CLLocation(latitude: curr.latitude, longitude: curr.longitude))
+                
+                let currentSpeedKmh = await MainActor.run { customSpeedKmh }
+                let speedMps = max(currentSpeedKmh / 3.6, RouteSimulationDefaults.minimumSpeedMetersPerSecond)
+                let delay = distance / speedMps
+                
+                try? await Task.sleep(for: .seconds(delay))
                 guard !Task.isCancelled else { return }
-
-                let code = await sendLocationUpdate(for: sample.coordinate)
+                
+                let code = await sendLocationUpdate(for: curr)
                 guard code == 0 else {
                     await MainActor.run {
                         routePlaybackTask = nil
@@ -1542,13 +1218,13 @@ struct LocationSimulationView: View {
                     }
                     return
                 }
-
-                lastSuccessfulCoordinate = sample.coordinate
+                
+                lastSuccessfulCoordinate = curr
                 await MainActor.run {
-                    routePlaybackCoordinate = sample.coordinate
+                    routePlaybackCoordinate = curr
                 }
             }
-
+            
             await MainActor.run {
                 routePlaybackTask = nil
                 if let lastSuccessfulCoordinate {
@@ -1558,27 +1234,29 @@ struct LocationSimulationView: View {
             }
         }
     }
-
+    
     private func sendLocationUpdate(for coordinate: CLLocationCoordinate2D) async -> Int32 {
         await withCheckedContinuation { continuation in
-            LocationSimulationCommandQueue.shared.async {
+            Self.locationQueue.async {
                 continuation.resume(returning: locationUpdateCode(for: coordinate))
             }
         }
     }
-
+    
     private func locationUpdateCode(for coordinate: CLLocationCoordinate2D) -> Int32 {
         simulate_location(deviceIP, coordinate.latitude, coordinate.longitude, pairingFilePath)
     }
 }
 
+// MARK: - Route Search Sheet
+
 private struct RouteSearchSheet: View {
     @Environment(\.dismiss) private var dismiss
-
+    
     let initialStart: RouteSearchSelection?
     let initialEnd: RouteSearchSelection?
     let onApply: (RouteSearchSelection, RouteSearchSelection) -> Void
-
+    
     @StateObject private var startCompleter = LocationSearchCompleter()
     @StateObject private var endCompleter = LocationSearchCompleter()
     @State private var startQuery: String
@@ -1588,7 +1266,7 @@ private struct RouteSearchSheet: View {
     @State private var isResolvingSelection = false
     @State private var errorMessage: String?
     @FocusState private var focusedField: RouteSearchField?
-
+    
     init(
         initialStart: RouteSearchSelection?,
         initialEnd: RouteSearchSelection?,
@@ -1602,7 +1280,7 @@ private struct RouteSearchSheet: View {
         _startSelection = State(initialValue: initialStart)
         _endSelection = State(initialValue: initialEnd)
     }
-
+    
     private var activeResults: [MKLocalSearchCompletion] {
         switch focusedField {
         case .start:
@@ -1613,11 +1291,11 @@ private struct RouteSearchSheet: View {
             return []
         }
     }
-
+    
     private var canApply: Bool {
         startSelection != nil && endSelection != nil && !isResolvingSelection
     }
-
+    
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
@@ -1629,7 +1307,7 @@ private struct RouteSearchSheet: View {
                     selection: startSelection,
                     field: .start
                 )
-
+                
                 routeField(
                     title: "End",
                     icon: "flag.checkered.circle.fill",
@@ -1638,20 +1316,20 @@ private struct RouteSearchSheet: View {
                     selection: endSelection,
                     field: .end
                 )
-
+                
                 if let errorMessage {
                     Text(errorMessage)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
-
+                
                 if isResolvingSelection {
                     ProgressView("Resolving location…")
                         .font(.footnote)
                 } else if !activeResults.isEmpty {
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(Array(activeResults.enumerated()), id: \.element) { index, result in
+                            ForEach(Array(activeResults.enumerated()), id: \.offset) { index, result in
                                 Button {
                                     resolve(result)
                                 } label: {
@@ -1671,7 +1349,7 @@ private struct RouteSearchSheet: View {
                                     .padding(.horizontal, 12)
                                 }
                                 .buttonStyle(.plain)
-
+                                
                                 if index < activeResults.count - 1 {
                                     Divider()
                                 }
@@ -1684,7 +1362,7 @@ private struct RouteSearchSheet: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-
+                
                 Spacer(minLength: 0)
             }
             .padding(16)
@@ -1696,7 +1374,7 @@ private struct RouteSearchSheet: View {
                         dismiss()
                     }
                 }
-
+                
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Use Route") {
                         guard let startSelection, let endSelection else { return }
@@ -1716,7 +1394,7 @@ private struct RouteSearchSheet: View {
             }
         }
     }
-
+    
     private func routeField(
         title: String,
         icon: String,
@@ -1729,11 +1407,11 @@ private struct RouteSearchSheet: View {
             Text(title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-
+            
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .foregroundStyle(tint)
-
+                
                 TextField(title, text: text)
                     .textInputAutocapitalization(.words)
                     .autocorrectionDisabled()
@@ -1753,7 +1431,7 @@ private struct RouteSearchSheet: View {
             }
             .padding(.horizontal, 2)
             .padding(.vertical, 4)
-
+            
             if let selection {
                 Text(String(format: "%.5f, %.5f", selection.coordinate.latitude, selection.coordinate.longitude))
                     .font(.caption.monospaced())
@@ -1761,7 +1439,7 @@ private struct RouteSearchSheet: View {
             }
         }
     }
-
+    
     private func update(query: String, for field: RouteSearchField) {
         switch field {
         case .start:
@@ -1776,26 +1454,26 @@ private struct RouteSearchSheet: View {
             endCompleter.update(query: query)
         }
     }
-
+    
     private func resolve(_ completion: MKLocalSearchCompletion) {
         let field = focusedField ?? .start
         let request = MKLocalSearch.Request(completion: completion)
         isResolvingSelection = true
         errorMessage = nil
-
+        
         MKLocalSearch(request: request).start { response, error in
             DispatchQueue.main.async {
                 isResolvingSelection = false
-
+                
                 guard let item = response?.mapItems.first else {
                     errorMessage = error?.localizedDescription ?? "Could not resolve that location."
                     return
                 }
-
+                
                 let name = item.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let title = name.isEmpty ? completion.title : name
                 let selection = RouteSearchSelection(title: title, coordinate: item.placemark.coordinate)
-
+                
                 switch field {
                 case .start:
                     startSelection = selection
@@ -1819,7 +1497,7 @@ struct BookmarksView: View {
     @Binding var bookmarks: [LocationBookmark]
     let onSelect: (LocationBookmark) -> Void
     let onDelete: (IndexSet) -> Void
-
+    
     var body: some View {
         NavigationStack {
             Group {
